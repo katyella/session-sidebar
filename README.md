@@ -2,6 +2,8 @@
 
 A side pane that opens in every Claude Code session (terminal 144 columns or wider; `/sidebar` opens it at any width).
 
+![The sidebar filling in while Claude builds a small app with three subagents, shown at 6x speed](assets/sidebar.gif)
+
 Sections, top to bottom:
 
 - **For you**: what is waiting on you, from `<session scratchpad>/for-you.md` (one `- item` per line; `- [x]` hides it). Shown in yellow at the top only when something is waiting; a new item raises a toast and a native notification.
