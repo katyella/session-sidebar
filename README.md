@@ -48,3 +48,7 @@ Keep `for-you.md` in your scratchpad directory as the list of things waiting on 
 ## Change it
 
 The whole sidebar is `hooks/register.tsx`. Ask Claude to change it, then run `/reload-plugins`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
