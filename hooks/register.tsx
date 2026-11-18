@@ -12,6 +12,8 @@ const tasks = atom({ plugin: 'session-sidebar', key: 'tasks' } as const, [], { s
 const selected = atom({ plugin: 'session-sidebar', key: 'selected' } as const, '', { shape: 'selected-1' })
 const road = atom({ plugin: 'session-sidebar', key: 'road' } as const, { title: '', items: [], mtimeMs: 0 }, { shape: 'road-1' })
 const forYou = atom({ plugin: 'session-sidebar', key: 'forYou' } as const, { items: [], mtimeMs: 0 } as ForYou, { shape: 'foryou-1' })
+/** Kept in session state so a plugin reload after a /clear still knows the first session's scratchpad. */
+const sessions = atom({ plugin: 'session-sidebar', key: 'sessions' } as const, [] as string[], { shape: 'sessions-1' })
 /** For-you lines shown at most. */
 const FOR_YOU_ROWS = 5
 const messages = atom({ plugin: 'session-sidebar', key: 'messages' } as const, [], { shape: 'messages-1' })
@@ -83,6 +85,16 @@ let transcriptSession = ''
  * while tasks move to the new one). A file is read from whichever copy is newest.
  */
 const scratchDirs = new Set<string>()
+/** The for-you file the poll last read: a button press uses it as is (session lookups are for the poll). */
+let forYouPath: string | undefined
+/** For-you items already announced by a toast and notification. */
+const announced = new Set<string>()
+let sessionDir: string | undefined
+let sessionDirOf = ''
+let sessionMissAt = 0
+/** When the running poll began: a poll stuck past POLL_STUCK_MS no longer blocks the next one. */
+let pollingSince = 0
+const POLL_STUCK_MS = 15_000
 /** Tasks whose name was looked up in the transcript already (found or not). */
 const named = new Set<string>()
 let polling = false
@@ -152,14 +164,40 @@ async function findTasksDir($: EngineInterface): Promise<string | undefined> {
   return undefined
 }
 
-/** This process's scratchpad folders, with the session's own and the one beside its tasks folder added. */
+/**
+ * This process's scratchpad folders: the current session's (beside its folder on disk) and the first session's
+ * (the scratchpad Claude is told about keeps the id the process started with, also after a /clear).
+ */
 async function scratchCandidates($: EngineInterface): Promise<string[]> {
-  const info = await $.session.info().catch(() => undefined)
-  const own = info?.scratchpadDir?.replace(/\/+$/, '')
-  if (own !== undefined && own !== '') scratchDirs.add(own)
-  const dir = await findTasksDir($)
-  if (dir !== undefined) scratchDirs.add(dir.replace(/\/tasks$/, '/scratchpad'))
+  const folder = await findSessionDir($)
+  if (folder !== undefined) {
+    scratchDirs.add(`${folder}/scratchpad`)
+    const project = folder.replace(/\/[^/]+$/, '')
+    for (const id of await read($, sessions)) scratchDirs.add(`${project}/${id}/scratchpad`)
+  }
   return [...scratchDirs]
+}
+
+/** <tmp>/claude-<uid>/<project>/<session>: made when the session starts, before any background task. */
+async function findSessionDir($: EngineInterface): Promise<string | undefined> {
+  const session = await $.session.id()
+  if (sessionDir !== undefined && sessionDirOf === session) return sessionDir
+  const now = await $.clock.now()
+  if (sessionDirOf === session && now - sessionMissAt < 5_000) return undefined
+  sessionDirOf = session
+  sessionDir = undefined
+  for (const root of ['/private/tmp', '/tmp']) {
+    const found = await $.process
+      .run(['find', root, '-maxdepth', '3', '-type', 'd', '-name', session], { timeoutMs: 5_000 })
+      .catch(() => undefined)
+    const dir = found?.stdout.split('\n').find(line => line.trim() !== '')
+    if (dir !== undefined) {
+      sessionDir = dir.trim()
+      return sessionDir
+    }
+  }
+  sessionMissAt = now
+  return undefined
 }
 
 /** The newest copy of a scratchpad file (road.md, for-you.md) among this process's scratchpad folders. */
@@ -179,11 +217,6 @@ async function findTranscript($: EngineInterface): Promise<string | null> {
   const session = await $.session.id()
   if (transcriptPath !== undefined && transcriptSession === session) return transcriptPath
   transcriptSession = session
-  const info = await $.session.info().catch(() => undefined)
-  if (info !== undefined && info.transcriptPath !== '') {
-    transcriptPath = info.transcriptPath
-    return transcriptPath
-  }
   const found = await $.process
     .run(['/bin/sh', '-c', 'find "$HOME/.claude/projects" -maxdepth 2 -name "$1.jsonl" -print -quit', 'sh', session], { timeoutMs: 10_000 })
     .catch(() => undefined)
@@ -432,6 +465,7 @@ function parseForYou(text: string): string[] {
 async function pollForYou($: EngineInterface): Promise<void> {
   const current = await read($, forYou)
   const file = await scratchFile($, 'for-you.md')
+  forYouPath = file?.path
   if (file === undefined) {
     if (current.mtimeMs !== 0) await update($, forYou, () => ({ items: [], mtimeMs: 0 }))
     return
@@ -440,7 +474,9 @@ async function pollForYou($: EngineInterface): Promise<void> {
   const text = await $.fs.read(file.path).catch(() => undefined)
   if (text === undefined) return
   const items = parseForYou(text)
-  const added = items.filter(item => !current.items.includes(item))
+  // Announced once per process: a re-read or a reload never repeats a toast or a notification.
+  const added = items.filter(item => !current.items.includes(item) && !announced.has(item))
+  for (const item of items) announced.add(item)
   await update($, forYou, () => ({ items, mtimeMs: file.mtimeMs }))
   for (const item of added.slice(0, 2)) {
     $.ui.toast(`For you: ${item}`, { timeoutMs: 15_000 })
@@ -450,11 +486,24 @@ async function pollForYou($: EngineInterface): Promise<void> {
 
 /** Marks one for-you item done in the file ("- [x] item") and drops it from the list at once. */
 async function markForYouDone($: EngineInterface, item: string): Promise<void> {
-  const found = await scratchFile($, 'for-you.md')
-  if (found === undefined) return
-  const path = found.path
+  try {
+    await markDone($, item)
+  } catch (error) {
+    $.ui.toast(`Could not mark done: ${error instanceof Error ? error.message : String(error)}`, { timeoutMs: 8_000 })
+  }
+}
+
+async function markDone($: EngineInterface, item: string): Promise<void> {
+  const path = forYouPath
+  if (path === undefined) {
+    $.ui.toast('No for-you.md found yet', { timeoutMs: 5_000 })
+    return
+  }
   const text = await $.fs.read(path).catch(() => undefined)
-  if (text === undefined) return
+  if (text === undefined) {
+    $.ui.toast('Could not read for-you.md', { timeoutMs: 6_000 })
+    return
+  }
   let marked = false
   const lines = text.split('\n').map(line => {
     if (marked) return line
@@ -463,7 +512,10 @@ async function markForYouDone($: EngineInterface, item: string): Promise<void> {
     marked = true
     return `${m[1] ?? '- '}[x] ${m[3] ?? ''}`
   })
-  if (!marked) return
+  if (!marked) {
+    $.ui.toast('That item is no longer open in for-you.md', { timeoutMs: 5_000 })
+    return
+  }
   const wrote = await $.fs.write(path, lines.join('\n')).then(() => true, () => false)
   if (!wrote) {
     $.ui.toast('Could not update for-you.md', { timeoutMs: 6_000 })
@@ -924,19 +976,33 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // A refused command must not stop the polling below.
     await $.command.register({ name: 'sidebar', description: 'Open the session sidebar: road, tasks, agents and messages' }).catch(() => undefined)
+    void $.session.id().then(
+      id => update($, sessions, ids => (ids.includes(id) ? ids : [...ids, id].slice(-8))),
+      () => undefined,
+    )
     $.clock.every(POLL_MS, async () => {
-      if (polling) return
+      const now = await $.clock.now()
+      if (polling && now - pollingSince < POLL_STUCK_MS) return
       polling = true
+      pollingSince = now
+      const mine = now
       try {
         await poll($)
       } catch {
         // The next period tries again.
       } finally {
-        polling = false
+        // A poll that was given up on must not clear the flag of the one that replaced it.
+        if (pollingSince === mine) polling = false
       }
     })
     void $.ui.open({ id: PANE, title: TITLE })
 
+    return next(e)
+  })
+
+  on('session.end', async ($, e, next) => {
+    // A /clear goes on under a new id; both ids' scratchpads stay candidates.
+    await update($, sessions, ids => (ids.includes(e.sessionId) ? ids : [...ids, e.sessionId].slice(-8))).catch(() => undefined)
     return next(e)
   })
 
@@ -1099,13 +1165,13 @@ export const register: Register = on => {
         {heading('FOR YOU', forYouNow.items.length > 0 ? `${forYouNow.items.length} waiting on you` : '', forYouNow.items.length > 0 ? 'warning' : 'success')}
         {forYouNow.items.length === 0 && <Text color="success">✓ nothing now</Text>}
         {forYouShown.map((item, i) => (
+          // One line each: the button first so it never wraps away, the item cut to the pane's width.
           <Box key={`you-${i}`} flexDirection="row">
-            <Text color="warning" bold>
-              {'▸ '}
-            </Text>
-            <Text bold>{item}</Text>
-            <Text> </Text>
             <Button plain label="✓ done" onPress={() => void markForYouDone($, item)} />
+            <Text color="warning" bold>
+              {' ▸ '}
+            </Text>
+            <Text bold>{oneLine(item, Math.max(12, width - 12))}</Text>
           </Box>
         ))}
         {forYouNow.items.length > FOR_YOU_ROWS && <Text color="warning">+{forYouNow.items.length - FOR_YOU_ROWS} more in for-you.md</Text>}

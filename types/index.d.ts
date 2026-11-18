@@ -89,6 +89,8 @@ declare module 'claude-code' {
       agents: Shaped<BgAgent[]>
       road: Shaped<Road>
       forYou: Shaped<ForYou>
+      /** Session ids this process has used, first one first (a /clear starts a new id). */
+      sessions: Shaped<string[]>
       messages: Shaped<AgentMessage[]>
       /** The task chosen with its hotkey; '' follows the newest running task. */
       selected: Shaped<string>
