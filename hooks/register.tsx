@@ -80,9 +80,9 @@ let tasksMissAt = 0
 let transcriptPath: string | null | undefined
 let transcriptSession = ''
 /**
- * The scratchpad folders this process has used: the one the session reports, the one beside its tasks folder,
- * and earlier ones kept across a /clear (the scratchpad Claude is told about can stay on the first session's id
- * while tasks move to the new one). A file is read from whichever copy is newest.
+ * The scratchpad folders this process has used: the one the session reports ($.session.info().scratchpadDir), the
+ * one beside the current session's folder, and earlier ones kept across a /clear (after a /clear the scratchpad
+ * Claude is told about may keep either id). A file is read from whichever copy is newest.
  */
 const scratchDirs = new Set<string>()
 /** The for-you file the poll last read: a button press uses it as is (session lookups are for the poll). */
@@ -165,10 +165,13 @@ async function findTasksDir($: EngineInterface): Promise<string | undefined> {
 }
 
 /**
- * This process's scratchpad folders: the current session's (beside its folder on disk) and the first session's
- * (the scratchpad Claude is told about keeps the id the process started with, also after a /clear).
+ * This process's scratchpad folders: the one the session reports (the folder Claude is told to write to), the
+ * current session's (beside its folder on disk) and earlier sessions' ids. After a /clear the reported scratchpad
+ * can sit under either the old or the new id, so it is read from the session rather than derived from an id.
  */
 async function scratchCandidates($: EngineInterface): Promise<string[]> {
+  const reported = await $.session.info().then(i => i.scratchpadDir, () => undefined)
+  if (reported) scratchDirs.add(reported.replace(/\/+$/, ''))
   const folder = await findSessionDir($)
   if (folder !== undefined) {
     scratchDirs.add(`${folder}/scratchpad`)
