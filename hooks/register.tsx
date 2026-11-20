@@ -975,6 +975,27 @@ function age(t: BgTask, now: number): string {
 
 const NOTIFICATION = /<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>(?:[\s\S]*?<summary>([^<]*)<\/summary>)?/g
 
+/** Prompts with no sidebar to fill, or whose writer is not the lead: no section. */
+const NO_SECTION: readonly string[] = ['bare', 'print', 'sdk-preset', 'teammate']
+
+/**
+ * The system prompt section that has Claude keep road.md and for-you.md, so the Road so far and For you sections
+ * fill in once the plugin is installed, with nothing to add to CLAUDE.md. Names the folder the poll reads.
+ */
+function filesSection(scratchpad: string | undefined): string {
+  const where = scratchpad ? `your scratchpad directory (${scratchpad})` : 'your scratchpad directory'
+  return [
+    '# Session sidebar: Road so far and For you',
+    '',
+    `The person has a sidebar beside this conversation. Two of its sections show files you keep in ${where}:`,
+    '',
+    '- `road.md`: for any task with more than a few steps, a checklist of the work. A `# Title` line, then one line per step: `- [x] done`, `- [~] in progress`, `- [ ] next`, `- [!] problem`, with short indented `  - notes` under a step. Update it as steps start, finish or hit a problem. Skip it for one-off questions.',
+    '- `for-you.md`: what is waiting on the person: something to look at, decide, approve, test or run themselves. One `- item` line each, short and specific, with the link or command they need. Write the item in the same turn you start waiting on them, before the reply that asks; saying it only in the reply is not enough. Mark it `- [x]` or delete the line once it is done or no longer needed. Leave the file empty when nothing is waiting.',
+    '',
+    'Only the main session writes these two files. A subagent or teammate never creates, edits or deletes them; one that wants a checklist uses its own file, such as `road-<agent>.md`.',
+  ].join('\n')
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // A refused command must not stop the polling below.
@@ -1008,6 +1029,15 @@ export const register: Register = on => {
     await update($, sessions, ids => (ids.includes(e.sessionId) ? ids : [...ids, e.sessionId].slice(-8))).catch(() => undefined)
     return next(e)
   })
+
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    if (e.surfaces.length === 0 || e.traits.some(t => NO_SECTION.includes(t))) return composed
+    const scratchpad = await $.session.info().then(i => i.scratchpadDir?.replace(/\/+$/, ''), () => undefined)
+    return {
+      sections: [...composed.sections, { id: 'session-sidebar:files', text: filesSection(scratchpad), scope: 'session' as const }],
+    }
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'sidebar' }, async $ => {
     await $.ui.open({ id: PANE, title: TITLE })

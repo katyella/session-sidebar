@@ -37,17 +37,7 @@ In the desktop app, where `/plugin` does not run: click + next to the prompt box
 
 ## Fill the For you and Road sections
 
-Tasks, agents and messages fill in on their own. For you and Road so far show what Claude writes to two files in its scratchpad folder, so tell it to keep them. Add this to `~/.claude/CLAUDE.md` (every project) or a project's `CLAUDE.md`:
-
-```markdown
-## Road so far (session sidebar)
-
-For any task with more than a few steps, keep a checklist at `road.md` in your scratchpad directory; the session sidebar shows it live. Format: a `# Title` line, then one line per step: `- [x] done`, `- [~] in progress`, `- [ ] next`, `- [!] problem`, with short indented `  - notes` under a step. Update it as steps start, finish or hit a problem. Skip it for one-off questions.
-
-## For you (session sidebar)
-
-Keep `for-you.md` in your scratchpad directory as the list of things waiting on the user: something to look at, decide, approve, test or run themselves. One `- item` line each, short and specific, with the link or command they need. Write the item in the same turn you start waiting on them, before the reply that asks. Mark it `- [x]` or delete the line once it is done or no longer needed. Leave the file empty when nothing is waiting.
-```
+Tasks, agents and messages fill in on their own. For you and Road so far show two files Claude keeps in its scratchpad folder, `for-you.md` and `road.md`. The plugin adds a short section to Claude's system prompt telling it to keep them, so there is nothing to set up: Claude adds a For you item before it asks you something, and keeps a Road checklist for any task with more than a few steps. Subagents and teammates leave both files to the main session.
 
 ## Change it
 
