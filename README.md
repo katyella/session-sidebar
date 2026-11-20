@@ -23,11 +23,15 @@ At the prompt of a Claude Code terminal session:
 /plugin install session-sidebar --marketplace katyella/session-sidebar
 ```
 
-Answer `y` to add the marketplace, then pick a scope (the user scope puts it in every session). From a shell instead:
+Answer `y` to add the marketplace, then pick a scope (the user scope puts it in every session). The sidebar opens in that session right away.
+
+From a shell instead:
 
 ```
 claude plugin install session-sidebar --marketplace katyella/session-sidebar
 ```
+
+A session that was already open does not see a shell install. Run `/reload-plugins` in it (no restart needed); sessions started afterwards load it on their own.
 
 In the desktop app, where `/plugin` does not run: click + next to the prompt box, then Plugins, Add marketplace with `katyella/session-sidebar`, then Add plugin.
 
