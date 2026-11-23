@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, ThemeKey } from 'claude-code'
+import type { EngineInterface, Register, RenderSurface, ThemeKey } from 'claude-code'
 
-import type { AgentMessage, BgAgent, BgTask, ForYou, Road, RoadItem, Tail } from '../types'
+import type { AgentMessage, BgAgent, BgTask, FilesNote, ForYou, Road, RoadItem, Tail } from '../types'
 
 // No gray (dimColor or 'inactive'): it is hard to read in this terminal theme.
 const PANE = 'session-sidebar'
@@ -19,6 +19,8 @@ const FOR_YOU_ROWS = 5
 const messages = atom({ plugin: 'session-sidebar', key: 'messages' } as const, [], { shape: 'messages-1' })
 const agents = atom({ plugin: 'session-sidebar', key: 'agents' } as const, [], { shape: 'agents-1' })
 const tail = atom({ plugin: 'session-sidebar', key: 'tail' } as const, { id: '', lines: [], size: 0, now: 0 }, { shape: 'tail-1' })
+/** Where the files section went out as prompt context (the fallback); in session state so a reload does not send it again. */
+const filesNote = atom({ plugin: 'session-sidebar', key: 'filesNote' } as const, { sessionId: '', tokens: 0 } as FilesNote, { shape: 'filesnote-1' })
 
 const POLL_MS = 1000
 const TAIL_LINES = 400
@@ -996,6 +998,50 @@ function filesSection(scratchpad: string | undefined): string {
   ].join('\n')
 }
 
+/** Prompts the person sent: the ones the files section rides on when the system prompt can't carry it. */
+const PERSON_ORIGINS: readonly string[] = ['composer', 'bridge']
+/** How often this module's prompt.compose hook has run; it stays 0 where a plugin above skips the hook. */
+let composeRuns = 0
+/** Whether a plugin above skips the prompt.compose hook, once the probe has said; it holds for the process. */
+let composeSkipped: boolean | undefined
+
+/**
+ * Whether a plugin seated above this one skips its prompt.compose hook, so the files section never reaches the
+ * system prompt. The built-in cc-plugin-sec-default does that on a Team or Enterprise plan or wherever managed
+ * settings exist: it sends prompt.compose on past every user-tier plugin, but lets prompt.submit through. A hook
+ * that has run answers at once; otherwise a composition no one sends tells whether the hook is reached.
+ */
+async function isComposeSkipped($: EngineInterface, surfaces: readonly RenderSurface[]): Promise<boolean> {
+  if (composeRuns > 0) return false
+  if (composeSkipped === undefined) {
+    // Every fact named, so no hook above fails on a missing one and lets the probe reach this module's hook by
+    // accident; `analysis` is a render that is measured, never sent (as /context makes).
+    const model = await $.session.model()
+    await $.prompt.compose({ model, promptModel: model, surfaces, tools: [], outputStyle: null, traits: ['analysis'] })
+    composeSkipped = composeRuns === 0
+  }
+  return composeSkipped
+}
+
+/**
+ * The files section as context for the person's prompt, where the system prompt can't carry it and the
+ * conversation does not hold it already: it goes out once per session id (a /clear starts a new one), and again
+ * after a /compact or once the context has shrunk to under half since the last prompt (an automatic compaction).
+ */
+async function filesContext($: EngineInterface): Promise<string | undefined> {
+  // No surface draws the sidebar (-p, the SDK): nothing to fill.
+  const surfaces = await $.session.surfaces()
+  if (surfaces.length === 0 || !(await isComposeSkipped($, surfaces))) return undefined
+  const id = await $.session.id()
+  const tokens = (await $.session.usage()).context.tokens ?? 0
+  const sent = await read($, filesNote)
+  const isHeld = sent.sessionId === id && tokens >= sent.tokens / 2
+  await update($, filesNote, () => ({ sessionId: id, tokens }))
+  if (isHeld) return undefined
+  const scratchpad = await $.session.info().then(i => i.scratchpadDir?.replace(/\/+$/, ''), () => undefined)
+  return filesSection(scratchpad)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // A refused command must not stop the polling below.
@@ -1031,6 +1077,7 @@ export const register: Register = on => {
   })
 
   on('prompt.compose', async ($, e, next) => {
+    composeRuns += 1
     const composed = await next(e)
     if (e.surfaces.length === 0 || e.traits.some(t => NO_SECTION.includes(t))) return composed
     const scratchpad = await $.session.info().then(i => i.scratchpadDir?.replace(/\/+$/, ''), () => undefined)
@@ -1107,6 +1154,13 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e, next) => {
+    // The files section's fallback, where a plugin above skips the prompt.compose hook: context on the person's prompt.
+    if (PERSON_ORIGINS.includes(e.origin.kind)) {
+      // After a /compact the conversation no longer holds the section; a /clear starts a new session id.
+      if (e.command?.name === 'compact') await update($, filesNote, () => ({ sessionId: '', tokens: 0 })).catch(() => undefined)
+      const files = e.command === undefined ? await filesContext($).catch(() => undefined) : undefined
+      return files === undefined ? next(e) : next({ ...e, context: [...(e.context ?? []), files] })
+    }
     if (e.origin.kind === 'task-notification') {
       const ended = [...e.text.matchAll(NOTIFICATION)]
       if (ended.length > 0) {

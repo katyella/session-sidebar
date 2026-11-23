@@ -82,6 +82,16 @@ export type Tail = {
   now: number
 }
 
+/**
+ * Where the fallback last sent the files section as prompt context (used where a plugin above skips this one's
+ * prompt.compose hook): the session it went out in, and the context's input tokens at the latest prompt since.
+ * An empty sessionId: not sent.
+ */
+export type FilesNote = {
+  sessionId: string
+  tokens: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'session-sidebar': {
@@ -95,6 +105,7 @@ declare module 'claude-code' {
       /** The task chosen with its hotkey; '' follows the newest running task. */
       selected: Shaped<string>
       tail: Shaped<Tail>
+      filesNote: Shaped<FilesNote>
     }
   }
 }

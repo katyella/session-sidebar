@@ -39,6 +39,8 @@ In the desktop app, where `/plugin` does not run: click + next to the prompt box
 
 Tasks, agents and messages fill in on their own. For you and Road so far show two files Claude keeps in its scratchpad folder, `for-you.md` and `road.md`. The plugin adds a short section to Claude's system prompt telling it to keep them, so there is nothing to set up: Claude adds a For you item before it asks you something, and keeps a Road checklist for any task with more than a few steps. Subagents and teammates leave both files to the main session.
 
+On a Team or Enterprise plan, or on a machine with managed settings, Claude Code's built-in security plugin keeps the plugins you install out of the system prompt. There the sidebar sends the same section with your first prompt instead (you don't see it), and again after a `/clear` or a compaction. Nothing to set up there either.
+
 ## Change it
 
 The whole sidebar is `hooks/register.tsx`. Ask Claude to change it, then run `/reload-plugins`.
