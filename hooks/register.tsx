@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface, ThemeKey } from 'claude-code'
 
 import type { AgentMessage, BgAgent, BgTask, FilesNote, ForYou, Road, RoadItem, Tail } from '../types'
+import { FOR_YOU_GUTTER, URL_SPLIT, forYouView, linkLabel, parseForYou, trimLink, withoutLinks } from './for-you'
+import type { ForYouView } from './for-you'
 
 // No gray (dimColor or 'inactive'): it is hard to read in this terminal theme.
 const PANE = 'session-sidebar'
@@ -11,7 +13,8 @@ const TITLE = 'Session'
 const tasks = atom({ plugin: 'session-sidebar', key: 'tasks' } as const, [], { shape: 'tasks-2' })
 const selected = atom({ plugin: 'session-sidebar', key: 'selected' } as const, '', { shape: 'selected-1' })
 const road = atom({ plugin: 'session-sidebar', key: 'road' } as const, { title: '', items: [], mtimeMs: 0 }, { shape: 'road-1' })
-const forYou = atom({ plugin: 'session-sidebar', key: 'forYou' } as const, { items: [], mtimeMs: 0 } as ForYou, { shape: 'foryou-1' })
+const forYou = atom({ plugin: 'session-sidebar', key: 'forYou' } as const, { items: [], mtimeMs: 0 } as ForYou, { shape: 'foryou-2' })
+const forYouOpen = atom({ plugin: 'session-sidebar', key: 'forYouOpen' } as const, '', { shape: 'foryouopen-1' })
 /** Kept in session state so a plugin reload after a /clear still knows the first session's scratchpad. */
 const sessions = atom({ plugin: 'session-sidebar', key: 'sessions' } as const, [] as string[], { shape: 'sessions-1' })
 /** For-you lines shown at most. */
@@ -455,17 +458,6 @@ async function pollRoad($: EngineInterface): Promise<void> {
 
 // ---------- For you ----------
 
-/** The for-you file: one "- item" (or "- [ ] item") per thing waiting on the person; "- [x] item" is done and hidden. */
-function parseForYou(text: string): string[] {
-  const items: string[] = []
-  for (const line of text.split('\n')) {
-    const m = /^\s*[-*]\s+(?:\[([ xX])\]\s+)?(.*\S)\s*$/.exec(line)
-    if (m === null || m[1] === 'x' || m[1] === 'X') continue
-    items.push(m[2] ?? '')
-  }
-  return items
-}
-
 /** Re-reads the for-you file when it changed; a new item raises a toast and a native notification. */
 async function pollForYou($: EngineInterface): Promise<void> {
   const current = await read($, forYou)
@@ -480,12 +472,14 @@ async function pollForYou($: EngineInterface): Promise<void> {
   if (text === undefined) return
   const items = parseForYou(text)
   // Announced once per process: a re-read or a reload never repeats a toast or a notification.
-  const added = items.filter(item => !current.items.includes(item) && !announced.has(item))
-  for (const item of items) announced.add(item)
+  const known = new Set(current.items.map(item => item.text))
+  const added = items.filter(item => !known.has(item.text) && !announced.has(item.text))
+  for (const item of items) announced.add(item.text)
   await update($, forYou, () => ({ items, mtimeMs: file.mtimeMs }))
   for (const item of added.slice(0, 2)) {
-    $.ui.toast(`For you: ${item}`, { timeoutMs: 15_000 })
-    await $.ui.notify(item, { title: 'For you' }).catch(() => undefined)
+    const said = withoutLinks(item.text) || item.text
+    $.ui.toast(`For you: ${said}`, { timeoutMs: 15_000 })
+    await $.ui.notify(said, { title: 'For you' }).catch(() => undefined)
   }
 }
 
@@ -527,8 +521,9 @@ async function markDone($: EngineInterface, item: string): Promise<void> {
     return
   }
   const file = await $.fs.stat(path).catch(() => undefined)
-  await update($, forYou, cur => ({ items: cur.items.filter(i => i !== item), mtimeMs: file?.mtimeMs ?? cur.mtimeMs }))
-  $.ui.toast(`Done: ${item}`, { timeoutMs: 5_000 })
+  await update($, forYou, cur => ({ items: cur.items.filter(i => i.text !== item), mtimeMs: file?.mtimeMs ?? cur.mtimeMs }))
+  await update($, forYouOpen, cur => (cur === item ? '' : cur))
+  $.ui.toast(`Done: ${withoutLinks(item) || item}`, { timeoutMs: 5_000 })
 }
 
 /**
@@ -992,7 +987,7 @@ function filesSection(scratchpad: string | undefined): string {
     `The person has a sidebar beside this conversation. Two of its sections show files you keep in ${where}:`,
     '',
     '- `road.md`: for any task with more than a few steps, a checklist of the work. A `# Title` line, then one line per step: `- [x] done`, `- [~] in progress`, `- [ ] next`, `- [!] problem`, with short indented `  - notes` under a step. Update it as steps start, finish or hit a problem. Skip it for one-off questions.',
-    '- `for-you.md`: what is waiting on the person: something to look at, decide, approve, test or run themselves. One `- item` line each, short and specific, with the link or command they need. Write the item in the same turn you start waiting on them, before the reply that asks; saying it only in the reply is not enough. Mark it `- [x]` or delete the line once it is done or no longer needed. Leave the file empty when nothing is waiting.',
+    '- `for-you.md`: what is waiting on the person: something to look at, decide, approve, test or run themselves. One `- item` each: a short headline (about 50 characters) saying what they need to do, then the link or command they need on an indented `  - ` line under it, one per line. Write the item in the same turn you start waiting on them, before the reply that asks; saying it only in the reply is not enough. Mark the headline `- [x]` or delete the item once it is done or no longer needed. Leave the file empty when nothing is waiting.',
     '',
     'Only the main session writes these two files. A subagent or teammate never creates, edits or deletes them; one that wants a checklist uses its own file, such as `road-<agent>.md`.',
   ].join('\n')
@@ -1199,7 +1194,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Link } = $.ui.resolve(e)
     const list = await read($, tasks)
     const chosen = await read($, selected)
     const view = await read($, tail)
@@ -1209,10 +1204,12 @@ export const register: Register = on => {
     const roadNow = await read($, road)
     const roadView = roadLines(roadNow.items)
     const roadRows = roadView.lines.length + (roadView.folded > 0 ? 1 : 0)
+    const width = Math.min(cols - 2, 72)
     const forYouNow = await read($, forYou)
-    const forYouShown = forYouNow.items.slice(0, FOR_YOU_ROWS)
+    const opened = await read($, forYouOpen)
+    const forYouShown = forYouNow.items.slice(0, FOR_YOU_ROWS).map(item => forYouView(item, width, opened))
     // Always shown: an empty list reads "nothing now" (one row).
-    const forYouRows = Math.max(1, forYouShown.length + (forYouNow.items.length > FOR_YOU_ROWS ? 1 : 0))
+    const forYouRows = Math.max(1, forYouShown.reduce((n, v) => n + v.rows, 0) + (forYouNow.items.length > FOR_YOU_ROWS ? 1 : 0))
     const agentList = await read($, agents)
     const agentsInOrder = orderedAgents(agentList)
     const shown = ordered(list, now).slice(0, agentsInOrder.length > 0 ? MAX_ROWS - 1 : MAX_ROWS)
@@ -1227,7 +1224,6 @@ export const register: Register = on => {
     const working = agentList.filter(a => a.hidden !== true && agentIsLive(a)).length
     const messageList = await read($, messages)
     const showOutput = chosen !== '' && currentLabel !== undefined
-    const width = Math.min(cols - 2, 72)
     const feedLines = showOutput ? [] : feed(messageList, room, width)
     const running = ordered(list, now).filter(t => isLive(t, now)).length
     /** A section heading: a heavy colored rule with the section's name and a short detail. */
@@ -1246,21 +1242,81 @@ export const register: Register = on => {
         </Box>
       )
     }
+    /** A line's words with each link drawn as a link, labeled by its host and path cut to `max`. */
+    const inline = (line: string, max: number) =>
+      line.split(URL_SPLIT).flatMap((part, k) => {
+        if (k % 2 === 0) return part === '' ? [] : [part]
+        const url = trimLink(part)
+        const rest = part.slice(url.length)
+        return [<Link href={url} label={linkLabel(url, max)} />, ...(rest === '' ? [] : [rest])]
+      })
+    const forYouRow = (v: ForYouView, i: number) => {
+      const done = <Button plain key={`you-done-${i}`} label="✓ done" onPress={() => void markForYouDone($, v.item.text)} />
+      // The promise returned, so the press waits for the write.
+      const toggle = () => update($, forYouOpen, cur => (cur === v.item.text ? '' : v.item.text))
+      if (v.isOpen) {
+        return (
+          <Box key={`you-${i}`} flexDirection="column">
+            <Box flexDirection="row">
+              {done}
+              <Button plain key={`you-open-${i}`} onPress={toggle}>
+                <Text color="warning" bold>
+                  {' ▾ '}
+                </Text>
+              </Button>
+              <Text bold wrap="wrap">
+                {inline(v.item.text, width - FOR_YOU_GUTTER)}
+              </Text>
+            </Box>
+            {v.item.details.map((line, j) => (
+              <Box key={`you-${i}-${j}`} flexDirection="row">
+                <Text>{' '.repeat(9)}</Text>
+                <Text wrap="wrap">{inline(line, width - FOR_YOU_GUTTER)}</Text>
+              </Box>
+            ))}
+          </Box>
+        )
+      }
+      // One line: the button first so it never wraps away, the words cut in the middle, the links last.
+      const words = [
+        <Text key="mark" color="warning" bold>
+          {v.hasMore ? ' ▸ ' : ' • '}
+        </Text>,
+        <Text key="said" bold>
+          {v.said}
+        </Text>,
+      ]
+      return (
+        <Box key={`you-${i}`} flexDirection="row">
+          {done}
+          {v.hasMore ? (
+            <Button plain key={`you-open-${i}`} onPress={toggle}>
+              {words}
+            </Button>
+          ) : (
+            <Text>{words}</Text>
+          )}
+          {v.links.map(url => (
+            <Text key={url}>
+              {' '}
+              <Link href={url} label={linkLabel(url)} />
+            </Text>
+          ))}
+        </Box>
+      )
+    }
+    const forYouDetail = [
+      forYouNow.items.length > 0 ? `${forYouNow.items.length} waiting on you` : '',
+      forYouShown.some(v => v.hasMore && !v.isOpen) ? '▸ opens one' : '',
+    ]
+      .filter(part => part !== '')
+      .join(' · ')
 
     return (
       <Box flexDirection="column">
-        {heading('FOR YOU', forYouNow.items.length > 0 ? `${forYouNow.items.length} waiting on you` : '', forYouNow.items.length > 0 ? 'warning' : 'success')}
+        {heading('FOR YOU', forYouDetail, forYouNow.items.length > 0 ? 'warning' : 'success')}
         {forYouNow.items.length === 0 && <Text color="success">✓ nothing now</Text>}
-        {forYouShown.map((item, i) => (
-          // One line each: the button first so it never wraps away, the item cut to the pane's width.
-          <Box key={`you-${i}`} flexDirection="row">
-            <Button plain label="✓ done" onPress={() => void markForYouDone($, item)} />
-            <Text color="warning" bold>
-              {' ▸ '}
-            </Text>
-            <Text bold>{oneLine(item, Math.max(12, width - 12))}</Text>
-          </Box>
-        ))}
+        {forYouShown.map(forYouRow)}
         {forYouNow.items.length > FOR_YOU_ROWS && <Text color="warning">+{forYouNow.items.length - FOR_YOU_ROWS} more in for-you.md</Text>}
         <Text> </Text>
         {roadRows > 0 && heading('ROAD SO FAR', roadNow.title)}

@@ -56,9 +56,15 @@ export type Road = {
   mtimeMs: number
 }
 
+/** One thing waiting on the person: its `- headline` line, and the indented lines under it (a link, a command). */
+export type ForYouItem = {
+  text: string
+  details: string[]
+}
+
 /** What the person should look at, decide or do now, from <session>/scratchpad/for-you.md. */
 export type ForYou = {
-  items: string[]
+  items: ForYouItem[]
   /** The file's last write when it was read; 0 when there is none. */
   mtimeMs: number
 }
@@ -99,6 +105,8 @@ declare module 'claude-code' {
       agents: Shaped<BgAgent[]>
       road: Shaped<Road>
       forYou: Shaped<ForYou>
+      /** The headline of the for-you item opened in full; '' when every item shows one line. */
+      forYouOpen: Shaped<string>
       /** Session ids this process has used, first one first (a /clear starts a new id). */
       sessions: Shaped<string[]>
       messages: Shaped<AgentMessage[]>

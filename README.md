@@ -6,7 +6,7 @@ A side pane that opens in every Claude Code session (terminal 144 columns or wid
 
 Sections, top to bottom:
 
-- **For you**: what is waiting on you, from `<session scratchpad>/for-you.md` (one `- item` per line; `- [x]` hides it). Shown in yellow at the top only when something is waiting; a new item raises a toast and a native notification.
+- **For you**: what is waiting on you, from `<session scratchpad>/for-you.md`: one `- headline` per item, with the link or command on indented `  - ` lines under it; `- [x]` hides it. Each item is one line, its words cut in the middle and its links last as short clickable labels (`↗ claude.ai`); click one marked ▸ to open it in full. A new item raises a toast and a native notification.
 
 - **Road so far**: the checklist Claude keeps at `<session scratchpad>/road.md` (`# Title`, then `- [x] done`, `- [~] now`, `- [ ] next`, `- [!] problem`, indented notes). Hidden when the file does not exist.
 - **Tasks**: this session's background shell commands by their real description, with live state, run time and pass/fail counts for go test, Swift Testing, XCTest, pytest -v, jest/vitest and cargo test. Press a number to tail that task's output; the same number or `f` goes back to messages.
