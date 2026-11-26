@@ -17,6 +17,8 @@ const forYou = atom({ plugin: 'session-sidebar', key: 'forYou' } as const, { ite
 const forYouOpen = atom({ plugin: 'session-sidebar', key: 'forYouOpen' } as const, '', { shape: 'foryouopen-1' })
 /** Kept in session state so a plugin reload after a /clear still knows the first session's scratchpad. */
 const sessions = atom({ plugin: 'session-sidebar', key: 'sessions' } as const, [] as string[], { shape: 'sessions-1' })
+/** Keys that press a choice's options, in order: letters the pane does not use (c clears, f follows). */
+const CHOICE_KEYS = ['a', 'b', 'd', 'e', 'g', 'h']
 /** For-you lines shown at most. */
 const FOR_YOU_ROWS = 5
 const messages = atom({ plugin: 'session-sidebar', key: 'messages' } as const, [], { shape: 'messages-1' })
@@ -1316,24 +1318,39 @@ export const register: Register = on => {
         </Box>
       )
     }
-    /** A for-you item: its row (or its open view), then a choice's options, one button each, answered with a press. */
+    /** The first choice on screen answers to letter keys too (c and f are the pane's own). */
+    const firstChoice = forYouShown.findIndex(v => (v.item.choices?.length ?? 0) > 0)
+    /**
+     * A for-you item: its row (or its open view), then a choice's options as a stack of filled chips, one button
+     * each, the same width, Claude's pick in the accent color; the pointer over one lights it up.
+     */
     const forYouRow = (v: ForYouView, i: number) => {
       const choices = v.item.choices ?? []
       if (choices.length === 0) return forYouHead(v, i)
+      const chip = Math.min(Math.max(...choices.map(c => c.label.length + (c.isRecommended ? 2 : 0))), Math.max(12, width - 18))
       return (
         <Box key={`you-choice-${i}`} flexDirection="column">
           {forYouHead(v, i)}
-          {choices.map((c, j) => (
-            <Button key={`you-${i}-pick-${j}`} plain onPress={() => answerForYou($, v.item, c.label)}>
-              <Text color="claude" bold>
-                {'         ▸ '}
-              </Text>
-              <Text bold={c.isRecommended} wrap="truncate-end">
-                {c.label}
-              </Text>
-              {c.isRecommended && <Text color="warning"> ★ Claude's pick</Text>}
-            </Button>
-          ))}
+          {choices.map((c, j) => {
+            const key = i === firstChoice ? CHOICE_KEYS[j] : undefined
+            const words = `${c.label}${c.isRecommended ? ' ★' : ''}`
+            const said = words.length > chip ? `${words.slice(0, chip - 1)}…` : words.padEnd(chip)
+            return (
+              <Box key={`you-${i}-opt-${j}`} flexDirection="row">
+                <Text>{key === undefined ? '            ' : '         '}</Text>
+                <Button key={`you-${i}-pick-${j}`} plain {...(key !== undefined ? { hotkey: key } : {})} onPress={() => answerForYou($, v.item, c.label)}>
+                  <Text
+                    color="inverseText"
+                    backgroundColor={c.isRecommended ? 'claude' : 'suggestion'}
+                    bold
+                    hover={{ backgroundColor: 'text' }}
+                  >
+                    {` ${said} `}
+                  </Text>
+                </Button>
+              </Box>
+            )
+          })}
         </Box>
       )
     }
