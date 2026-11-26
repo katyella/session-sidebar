@@ -4,63 +4,67 @@ import { parseForYou } from './for-you'
 // The other sessions' files, read on this machine or, over ssh, on the person's others: pure, so tests read them.
 
 /**
- * This machine's sessions: those that wrote road.md or for-you.md in the last day, from the scratchpads beside this
- * one (<tmp>/claude-<uid>/<project>/<session>/scratchpad), and those whose transcript was written in the last half
- * hour, files or not; each with its transcript's last write. `$1` is this session's scratchpad. Read-only.
+ * The scan both machines run, given `root` (the claude-<uid> tmp folder), `home` (that user's home) and `mt`
+ * (a file's mtime). With a session registry (`<home>/.claude/sessions/<pid>.json`, one per running Claude Code),
+ * only the interactive sessions whose process is alive are listed, so a closed session leaves at the next scan.
+ * Without one (an older Claude Code), sessions that wrote road.md or for-you.md in the last day, or their
+ * transcript in the last half hour. Each prints its transcript's last write, then its road and for-you lines.
  */
-export const LOCAL_SCAN = `
-root=$(dirname "$(dirname "$(dirname "$1")")")
-echo "NOW $(date +%s)"
-{
-  find "$root" -maxdepth 4 -path '*/scratchpad/*' \\( -name road.md -o -name for-you.md \\) -mmin -1440 2>/dev/null | sed 's#/scratchpad/.*##'
-  find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' -mmin -30 2>/dev/null | while read -r t; do echo "$root/$(basename "$(dirname "$t")")/$(basename "$t" .jsonl)"; done
-} | sort -u | head -80 | while read -r dir; do
-  sid=$(basename "$dir"); project=$(basename "$(dirname "$dir")")
-  case "$sid" in *-*-*-*-*) ;; *) continue ;; esac
-  # Headless runs in temp folders are not sessions anyone works in.
-  case "$project" in -private-var-folders-*|-var-folders-*|-tmp-*|-private-tmp-*) continue ;; esac
-  t="$HOME/.claude/projects/$project/$sid.jsonl"
-  m=0; [ -f "$t" ] && m=$(stat -f %m "$t" 2>/dev/null || stat -c %Y "$t")
+const SCAN_BODY = `
+emit() {
+  dir=$1; sid=$(basename "$dir"); project=$(basename "$(dirname "$dir")")
+  case "$sid" in *-*-*-*-*) ;; *) return ;; esac
+  case "$project" in -private-var-folders-*|-var-folders-*|-tmp-*|-private-tmp-*) return ;; esac
+  t="$home/.claude/projects/$project/$sid.jsonl"
+  m=0; [ -f "$t" ] && m=$(mt "$t")
   printf 'S\\t%s\\t%s\\t%s\\n' "$sid" "$project" "$m"
   [ -f "$dir/scratchpad/road.md" ] && awk -v s="$sid" '{print "R\\t" s "\\t" $0}' "$dir/scratchpad/road.md"
   [ -f "$dir/scratchpad/for-you.md" ] && awk -v s="$sid" '{print "Y\\t" s "\\t" $0}' "$dir/scratchpad/for-you.md"
-done
+}
+field() { sed -n "s/.*\\"$1\\" *: *\\"\\\\([^\\"]*\\\\)\\".*/\\\\1/p" "$2" | head -1; }
+if [ -d "$home/.claude/sessions" ]; then
+  for f in "$home"/.claude/sessions/*.json; do
+    [ -f "$f" ] || continue
+    kill -0 "$(basename "$f" .json)" 2>/dev/null || continue
+    kind=$(field kind "$f"); [ -z "$kind" ] || [ "$kind" = interactive ] || continue
+    sid=$(field sessionId "$f"); cwd=$(field cwd "$f")
+    [ -n "$sid" ] && [ -n "$cwd" ] || continue
+    echo "$root/$(printf %s "$cwd" | sed 's/[^A-Za-z0-9]/-/g')/$sid"
+  done
+else
+  {
+    find "$root" -maxdepth 4 -path '*/scratchpad/*' \\( -name road.md -o -name for-you.md \\) -mmin -1440 2>/dev/null | sed 's#/scratchpad/.*##'
+    find "$home/.claude/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' -mmin -30 2>/dev/null | while read -r t; do echo "$root/$(basename "$(dirname "$t")")/$(basename "$t" .jsonl)"; done
+  }
+fi | sort -u | head -80 | while read -r dir; do emit "$dir"; done
+`
+
+/** This machine's other sessions (see SCAN_BODY). `$1` is this session's scratchpad. Read-only. */
+export const LOCAL_SCAN = `
+root=$(dirname "$(dirname "$(dirname "$1")")")
+home=$HOME
+mt() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"; }
+echo "NOW $(date +%s)"
+${SCAN_BODY}
 `
 
 /**
- * The same on another machine, sent over ssh as `sh -s`: Linux or macOS, every user's claude-<uid> folder, a
- * session's transcript under that user's home. The machine's clock comes first, so ages read against it.
+ * The same on another machine, sent over ssh as `sh -s`: Linux or macOS, every user's claude-<uid> folder with
+ * that user's home. The machine's clock comes first, so ages read against it.
  */
 export const REMOTE_SCAN = `
 os=$(uname -s)
-now=$(date +%s)
-echo "NOW $now"
+echo "NOW $(date +%s)"
 mt() { if [ "$os" = Darwin ]; then stat -f %m "$1"; else stat -c %Y "$1"; fi; }
 homeof() {
   if [ "$os" = Darwin ]; then n=$(dscl . -search /Users UniqueID "$1" 2>/dev/null | awk 'NR==1{print $1}'); [ -n "$n" ] && echo "/Users/$n"
   else getent passwd "$1" 2>/dev/null | cut -d: -f6; fi
 }
 if [ "$os" = Darwin ]; then bases=$(ls -d /private/tmp/claude-* 2>/dev/null); else bases=$(ls -d /tmp/claude-* 2>/dev/null); fi
-for base in $bases; do
-  [ -d "$base" ] || continue
-  uid=\${base##*claude-}
-  home=$(homeof "$uid"); [ -z "$home" ] && home=$HOME
-  for dir in "$base"/*/*; do
-    [ -d "$dir" ] || continue
-    sid=$(basename "$dir"); project=$(basename "$(dirname "$dir")")
-    case "$sid" in *-*-*-*-*) ;; *) continue ;; esac
-    case "$project" in -private-var-folders-*|-var-folders-*|-tmp-*|-private-tmp-*) continue ;; esac
-    t="$home/.claude/projects/$project/$sid.jsonl"
-    m=0; [ -f "$t" ] && m=$(mt "$t")
-    r="$dir/scratchpad/road.md"; y="$dir/scratchpad/for-you.md"
-    fresh=0
-    [ $((now - m)) -lt 86400 ] && fresh=1
-    for f in "$r" "$y"; do [ -f "$f" ] && [ $((now - $(mt "$f"))) -lt 86400 ] && fresh=1; done
-    [ "$fresh" = 1 ] || continue
-    printf 'S\\t%s\\t%s\\t%s\\n' "$sid" "$project" "$m"
-    [ -f "$r" ] && awk -v s="$sid" '{print "R\\t" s "\\t" $0}' "$r"
-    [ -f "$y" ] && awk -v s="$sid" '{print "Y\\t" s "\\t" $0}' "$y"
-  done
+for root in $bases; do
+  [ -d "$root" ] || continue
+  home=$(homeof "\${root##*claude-}"); [ -z "$home" ] && home=$HOME
+  ${SCAN_BODY}
 done | head -600
 `
 
