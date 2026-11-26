@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface, ThemeKey } from 'claude-code'
 
-import type { AgentMessage, BgAgent, BgTask, FilesNote, ForYou, Road, RoadItem, Tail } from '../types'
+import type { AgentMessage, BgAgent, BgTask, FilesNote, ForYou, ForYouItem, Road, RoadItem, Tail } from '../types'
 import { FOR_YOU_GUTTER, URL_SPLIT, forYouView, linkLabel, parseForYou, trimLink, withoutLinks } from './for-you'
 import type { ForYouView } from './for-you'
 
@@ -13,7 +13,7 @@ const TITLE = 'Session'
 const tasks = atom({ plugin: 'session-sidebar', key: 'tasks' } as const, [], { shape: 'tasks-2' })
 const selected = atom({ plugin: 'session-sidebar', key: 'selected' } as const, '', { shape: 'selected-1' })
 const road = atom({ plugin: 'session-sidebar', key: 'road' } as const, { title: '', items: [], mtimeMs: 0 }, { shape: 'road-1' })
-const forYou = atom({ plugin: 'session-sidebar', key: 'forYou' } as const, { items: [], mtimeMs: 0 } as ForYou, { shape: 'foryou-2' })
+const forYou = atom({ plugin: 'session-sidebar', key: 'forYou' } as const, { items: [], mtimeMs: 0 } as ForYou, { shape: 'foryou-3' })
 const forYouOpen = atom({ plugin: 'session-sidebar', key: 'forYouOpen' } as const, '', { shape: 'foryouopen-1' })
 /** Kept in session state so a plugin reload after a /clear still knows the first session's scratchpad. */
 const sessions = atom({ plugin: 'session-sidebar', key: 'sessions' } as const, [] as string[], { shape: 'sessions-1' })
@@ -527,6 +527,16 @@ async function markDone($: EngineInterface, item: string): Promise<void> {
 }
 
 /**
+ * A choice answered from the sidebar: the item is marked done in the file, and the pick goes to Claude as the
+ * person's next message (queued if a turn is running).
+ */
+async function answerForYou($: EngineInterface, item: ForYouItem, choice: string): Promise<void> {
+  const ask = withoutLinks(item.text) || item.text
+  await markForYouDone($, item.text)
+  await $.prompt.submit({ text: `Answer to "${ask}": ${choice}`, asUser: true })
+}
+
+/**
  * The lines to draw: earlier finished steps folded into a count, the last two finished, then the
  * current step (with its notes), problems and what comes next, up to ROAD_ROWS lines.
  */
@@ -988,6 +998,7 @@ function filesSection(scratchpad: string | undefined): string {
     '',
     '- `road.md`: for any task with more than a few steps, a checklist of the work. A `# Title` line, then one line per step: `- [x] done`, `- [~] in progress`, `- [ ] next`, `- [!] problem`, with short indented `  - notes` under a step. Update it as steps start, finish or hit a problem. Skip it for one-off questions.',
     '- `for-you.md`: what is waiting on the person: something to look at, decide, approve, test or run themselves. One `- item` each: a short headline (about 50 characters) saying what they need to do, then the link or command they need on an indented `  - ` line under it, one per line. Write the item in the same turn you start waiting on them, before the reply that asks; saying it only in the reply is not enough. Mark the headline `- [x]` or delete the item once it is done or no longer needed. Leave the file empty when nothing is waiting.',
+    '- A choice in `for-you.md`: when the person must pick one of a few options, put each on its own indented line as `  - ( ) option` under the headline, and write `(*)` for the one you recommend. The sidebar draws them as buttons; a press marks the item done and sends their pick as their next message, `Answer to "<headline>": <option>`.',
     '',
     'Only the main session writes these two files. A subagent or teammate never creates, edits or deletes them; one that wants a checklist uses its own file, such as `road-<agent>.md`.',
   ].join('\n')
@@ -1250,7 +1261,7 @@ export const register: Register = on => {
         const rest = part.slice(url.length)
         return [<Link href={url} label={linkLabel(url, max)} />, ...(rest === '' ? [] : [rest])]
       })
-    const forYouRow = (v: ForYouView, i: number) => {
+    const forYouHead = (v: ForYouView, i: number) => {
       const done = <Button plain key={`you-done-${i}`} label="✓ done" onPress={() => void markForYouDone($, v.item.text)} />
       // The promise returned, so the press waits for the write.
       const toggle = () => update($, forYouOpen, cur => (cur === v.item.text ? '' : v.item.text))
@@ -1301,6 +1312,27 @@ export const register: Register = on => {
               {' '}
               <Link href={url} label={linkLabel(url)} />
             </Text>
+          ))}
+        </Box>
+      )
+    }
+    /** A for-you item: its row (or its open view), then a choice's options, one button each, answered with a press. */
+    const forYouRow = (v: ForYouView, i: number) => {
+      const choices = v.item.choices ?? []
+      if (choices.length === 0) return forYouHead(v, i)
+      return (
+        <Box key={`you-choice-${i}`} flexDirection="column">
+          {forYouHead(v, i)}
+          {choices.map((c, j) => (
+            <Button key={`you-${i}-pick-${j}`} plain onPress={() => answerForYou($, v.item, c.label)}>
+              <Text color="claude" bold>
+                {'         ▸ '}
+              </Text>
+              <Text bold={c.isRecommended} wrap="truncate-end">
+                {c.label}
+              </Text>
+              {c.isRecommended && <Text color="warning"> ★ Claude's pick</Text>}
+            </Button>
           ))}
         </Box>
       )

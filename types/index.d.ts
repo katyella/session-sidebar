@@ -60,6 +60,15 @@ export type Road = {
 export type ForYouItem = {
   text: string
   details: string[]
+  /** The options of a choice ("  - ( ) option" lines; "(*)" marks Claude's pick), drawn as buttons. */
+  choices?: ForYouChoice[]
+}
+
+/** One option of a for-you choice. */
+export type ForYouChoice = {
+  label: string
+  /** Claude's pick, written "(*)". */
+  isRecommended: boolean
 }
 
 /** What the person should look at, decide or do now, from <session>/scratchpad/for-you.md. */

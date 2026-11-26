@@ -1,11 +1,15 @@
-import type { ForYouItem } from '../types'
+import type { ForYouChoice, ForYouItem } from '../types'
 
 // The for-you file's items and how a row draws them: pure, so the tests read them directly.
 
+/** An option line under a headline: "( ) option", or "(*)" for Claude's pick. */
+const CHOICE = /^\(\s*([*★]?)\s*\)\s+(.*\S)$/
+
 /**
  * The for-you file: one "- headline" (or "- [ ] headline") per thing waiting on the person, with the indented lines
- * under it (a link, a command) as its details; "- [x] headline" is done and hidden with its details. Other lines at
- * the left edge (a title) are not items.
+ * under it (a link, a command) as its details; "- [x] headline" is done and hidden with its details. An indented
+ * "- ( ) option" line is one of the item's choices instead ("(*)": Claude's pick). Other lines at the left edge (a
+ * title) are not items.
  */
 export function parseForYou(text: string): ForYouItem[] {
   const items: ForYouItem[] = []
@@ -20,7 +24,12 @@ export function parseForYou(text: string): ForYouItem[] {
     const isDone = m[3] === 'x' || m[3] === 'X'
     const said = m[4] ?? ''
     if (isIndented && under !== undefined) {
-      if (under !== 'done' && !isDone) under.details.push(said)
+      if (under === 'done' || isDone) continue
+      const choice = CHOICE.exec(said)
+      if (choice !== null) {
+        const option: ForYouChoice = { label: choice[2] ?? '', isRecommended: (choice[1] ?? '') !== '' }
+        under.choices = [...(under.choices ?? []), option]
+      } else under.details.push(said)
       continue
     }
     // An item at the left edge; an indented one with nothing above it is an item too.
@@ -98,7 +107,9 @@ export function forYouView(item: ForYouItem, width: number, opened: string): For
   const hasMore = said !== full || item.details.length > 0 || links.length > rowLinks.length
   const isOpen = hasMore && opened === item.text
   const textRoom = Math.max(12, width - FOR_YOU_GUTTER)
-  const rows = isOpen ? [item.text, ...item.details].reduce((n, line) => n + Math.ceil(Math.max(1, line.length) / textRoom), 0) : 1
+  const lines = isOpen ? [item.text, ...item.details].reduce((n, line) => n + Math.ceil(Math.max(1, line.length) / textRoom), 0) : 1
+  // A choice's options always show, one button a line, so it can be answered without opening it.
+  const rows = lines + (item.choices?.length ?? 0)
   return { item, said, links: rowLinks, hasMore, isOpen, rows }
 }
 

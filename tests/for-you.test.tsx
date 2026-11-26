@@ -27,6 +27,24 @@ describe('the for-you file', () => {
     ])
   })
 
+  test('reads "( )" lines under a headline as its choices, "(*)" as Claude\'s pick', () => {
+    const items = parseForYou(
+      ['- Which demo should I build next?', '  - ( ) Welcome back catch-up', '  - (*) CI arrivals board', '  - (  ) Weather window', '  - one line of context', ''].join('\n'),
+    )
+    expect(items).toEqual([
+      {
+        text: 'Which demo should I build next?',
+        details: ['one line of context'],
+        choices: [
+          { label: 'Welcome back catch-up', isRecommended: false },
+          { label: 'CI arrivals board', isRecommended: true },
+          { label: 'Weather window', isRecommended: false },
+        ],
+      },
+    ])
+    expect(forYouView(items[0]!, 60, '').rows).toBe(4)
+  })
+
   test('keeps one-line items as they were', () => {
     expect(parseForYou('- one\n- two: https://x.dev/a\n')).toEqual([
       { text: 'one', details: [] },
@@ -66,7 +84,7 @@ describe('a for-you row', () => {
 
 /** The session's state as the kit keeps it, but for-you.md's items read as these (stored under the atom's shape tag). */
 function seedForYou(on: On, items: ForYou['items']): void {
-  on('state.get', (_, e, next) => (e.key === 'forYou' ? { value: { value: { shape: 'foryou-2', value: { items, mtimeMs: 1 } }, version: 1 } } : next(e)))
+  on('state.get', (_, e, next) => (e.key === 'forYou' ? { value: { value: { shape: 'foryou-3', value: { items, mtimeMs: 1 } }, version: 1 } } : next(e)))
 }
 
 const PANE = {
@@ -121,6 +139,33 @@ describe('the For you section', () => {
     expect(await ui.find({ key: 'you-open-0' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /Approve the plan/ })).toBeDefined()
     expect(await ui.find({ key: 'you-done-0' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('draws a choice\'s options as buttons, and a press sends the pick to Claude', async ($, on) => {
+    seedForYou(on, [
+      {
+        text: 'Which demo should I build next?',
+        details: [],
+        choices: [
+          { label: 'Welcome back catch-up', isRecommended: true },
+          { label: 'CI arrivals board', isRecommended: false },
+        ],
+      },
+    ])
+    mock.clock(on, { now: 1_000 })
+    const sent: string[] = []
+    on('prompt.submit', (_, e) => {
+      sent.push(e.text)
+      return { text: e.text }
+    })
+    on('ui.toast', () => ({ value: undefined }))
+
+    const ui = await $.ui.mount(PANE)
+    expect((await ui.find({ key: 'you-0-pick-0' }))?.text).toContain("Welcome back catch-up ★ Claude's pick")
+    expect((await ui.find({ key: 'you-0-pick-1' }))?.text).toContain('CI arrivals board')
+    await ui.press({ key: 'you-0-pick-1' })
+    expect(sent).toEqual(['Answer to "Which demo should I build next?": CI arrivals board'])
     await ui.unmount()
   })
 })
