@@ -131,4 +131,21 @@ describe('the Other sessions section', () => {
     expect(await ui.find({ key: 'others-root@cos-sess-k' })).toBeUndefined()
     await ui.unmount()
   })
+
+  test('reads working and idle against the clock, not the task clock that stands still with no task running', async ($, on) => {
+    const quiet: Others = { ...OTHERS, sessions: [{ ...OTHERS.sessions[0]!, items: [], activeAt: NOW - 120_000 }] }
+    on('state.get', (_, e, next) => {
+      if (e.key === 'others') return { value: { value: { shape: 'others-1', value: quiet }, version: 1 } }
+      // The task clock last moved an hour ago, when a background task ran.
+      if (e.key === 'tail') return { value: { value: { shape: 'tail-1', value: { id: '', lines: [], size: 0, now: NOW - 3_600_000 } }, version: 1 } }
+      return next(e)
+    })
+    mock.clock(on, { now: NOW })
+
+    const ui = await $.ui.mount(PANE)
+    const row = await ui.find({ key: 'others-here-sess-a' })
+    expect(row?.text).not.toContain('working')
+    expect(row?.text).toContain('Keep the VPN up')
+    await ui.unmount()
+  })
 })

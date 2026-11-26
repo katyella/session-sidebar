@@ -1011,10 +1011,8 @@ async function scanLocal($: EngineInterface): Promise<void> {
     if (out === undefined) return
     const now = await $.clock.now()
     const local = parseScan(out.stdout, '', skip, now)
-    await update($, others, cur => {
-      const next = [...local, ...cur.sessions.filter(s => s.host !== '')]
-      return JSON.stringify(next) === JSON.stringify(cur.sessions) ? cur : { ...cur, sessions: next, at: now }
-    })
+    // Written every scan, changed or not: the section's ages and working marks are read against the time of it.
+    await update($, others, cur => ({ ...cur, sessions: [...local, ...cur.sessions.filter(s => s.host !== '')], at: now }))
   } finally {
     isScanningLocal = false
   }
@@ -1308,10 +1306,12 @@ export const register: Register = (on, options) => {
     const forYouRows = Math.max(1, forYouShown.reduce((n, v) => n + v.rows, 0) + (forYouNow.items.length > FOR_YOU_ROWS ? 1 : 0))
     // Other sessions: by machine when there are other machines, each session one line until opened.
     const othersNow = await read($, others)
+    // Read against the clock, not the pane's task clock, which stands still while no task runs here.
+    const clockNow = await $.clock.now()
     const othersOpened = await read($, othersView)
     const groups = ['', ...machines].map(host => ({
       host,
-      list: othersShown(othersNow.sessions.filter(s => s.host === host), now),
+      list: othersShown(othersNow.sessions.filter(s => s.host === host), clockNow),
       state: othersNow.hosts.find(h => h.target === host),
     }))
     const isGrouped = machines.length > 0
@@ -1333,7 +1333,7 @@ export const register: Register = (on, options) => {
             : g.state === undefined
               ? 'checking…'
               : g.state.isUp
-                ? `read ${clock(now - g.state.at)} ago`
+                ? `read ${clock(clockNow - g.state.at)} ago`
                 : `unreachable: ${g.state.error ?? ''}`
         pushOther(
           <Button
@@ -1358,7 +1358,7 @@ export const register: Register = (on, options) => {
       const indent = isGrouped ? '  ' : ''
       for (const s of g.list) {
         const isOpen = othersOpened.open.includes(sessionKey(s))
-        const isWorking = now - s.activeAt < WORKING_MS
+        const isWorking = clockNow - s.activeAt < WORKING_MS
         const tone: ThemeKey = s.items.length > 0 ? 'warning' : isWorking ? 'claude' : 'success'
         const first = s.items[0]
         const summary =
@@ -1369,7 +1369,7 @@ export const register: Register = (on, options) => {
               : s.title !== ''
                 ? `${s.title} · ${s.done}/${s.total}`
                 : s.activeAt > 0
-                  ? `idle · ${clock(now - s.activeAt)} ago`
+                  ? `idle · ${clock(clockNow - s.activeAt)} ago`
                   : 'idle'
         const roomFor = Math.max(10, width - indent.length - s.project.length - 7)
         pushOther(
@@ -1454,7 +1454,7 @@ export const register: Register = (on, options) => {
     }
     if (othersHidden > 0) otherLines.push(<Text key="others-more" color="warning">{`+${othersHidden} more lines: fold a machine or a session`}</Text>)
     const othersWaiting = othersNow.sessions.filter(s => s.items.length > 0 && groups.some(g => g.host === s.host)).length
-    const othersWorking = othersNow.sessions.filter(s => now - s.activeAt < WORKING_MS).length
+    const othersWorking = othersNow.sessions.filter(s => clockNow - s.activeAt < WORKING_MS).length
     const othersRows = otherLines.length > 0 ? otherLines.length + 2 : 0
     const agentList = await read($, agents)
     const agentsInOrder = orderedAgents(agentList)

@@ -4,15 +4,21 @@ import { parseForYou } from './for-you'
 // The other sessions' files, read on this machine or, over ssh, on the person's others: pure, so tests read them.
 
 /**
- * This machine's sessions that wrote road.md or for-you.md in the last day, from the scratchpads beside this one
- * (<tmp>/claude-<uid>/<project>/<session>/scratchpad), each with its transcript's last write. `$1` is this
- * session's scratchpad. Read-only.
+ * This machine's sessions: those that wrote road.md or for-you.md in the last day, from the scratchpads beside this
+ * one (<tmp>/claude-<uid>/<project>/<session>/scratchpad), and those whose transcript was written in the last half
+ * hour, files or not; each with its transcript's last write. `$1` is this session's scratchpad. Read-only.
  */
 export const LOCAL_SCAN = `
 root=$(dirname "$(dirname "$(dirname "$1")")")
 echo "NOW $(date +%s)"
-find "$root" -maxdepth 4 -path '*/scratchpad/*' \\( -name road.md -o -name for-you.md \\) -mmin -1440 2>/dev/null | sed 's#/scratchpad/.*##' | sort -u | head -60 | while read -r dir; do
+{
+  find "$root" -maxdepth 4 -path '*/scratchpad/*' \\( -name road.md -o -name for-you.md \\) -mmin -1440 2>/dev/null | sed 's#/scratchpad/.*##'
+  find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' -mmin -30 2>/dev/null | while read -r t; do echo "$root/$(basename "$(dirname "$t")")/$(basename "$t" .jsonl)"; done
+} | sort -u | head -80 | while read -r dir; do
   sid=$(basename "$dir"); project=$(basename "$(dirname "$dir")")
+  case "$sid" in *-*-*-*-*) ;; *) continue ;; esac
+  # Headless runs in temp folders are not sessions anyone works in.
+  case "$project" in -private-var-folders-*|-var-folders-*|-tmp-*|-private-tmp-*) continue ;; esac
   t="$HOME/.claude/projects/$project/$sid.jsonl"
   m=0; [ -f "$t" ] && m=$(stat -f %m "$t" 2>/dev/null || stat -c %Y "$t")
   printf 'S\\t%s\\t%s\\t%s\\n' "$sid" "$project" "$m"
