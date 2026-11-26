@@ -1322,19 +1322,18 @@ export const register: Register = on => {
     const firstChoice = forYouShown.findIndex(v => (v.item.choices?.length ?? 0) > 0)
     /**
      * A for-you item: its row (or its open view), then a choice's options as a stack of filled chips, one button
-     * each, the same width, Claude's pick in the accent color; the pointer over one lights it up.
+     * each, the same width, Claude's pick in the accent color and named beside it; the pointer over one lights it up.
      */
     const forYouRow = (v: ForYouView, i: number) => {
       const choices = v.item.choices ?? []
       if (choices.length === 0) return forYouHead(v, i)
-      const chip = Math.min(Math.max(...choices.map(c => c.label.length + (c.isRecommended ? 2 : 0))), Math.max(12, width - 18))
+      const chip = Math.min(Math.max(...choices.map(c => c.label.length)), Math.max(12, width - 34))
       return (
         <Box key={`you-choice-${i}`} flexDirection="column">
           {forYouHead(v, i)}
           {choices.map((c, j) => {
             const key = i === firstChoice ? CHOICE_KEYS[j] : undefined
-            const words = `${c.label}${c.isRecommended ? ' ★' : ''}`
-            const said = words.length > chip ? `${words.slice(0, chip - 1)}…` : words.padEnd(chip)
+            const said = c.label.length > chip ? `${c.label.slice(0, chip - 1)}…` : c.label.padEnd(chip)
             return (
               <Box key={`you-${i}-opt-${j}`} flexDirection="row">
                 <Text>{key === undefined ? '            ' : '         '}</Text>
@@ -1347,6 +1346,11 @@ export const register: Register = on => {
                   >
                     {` ${said} `}
                   </Text>
+                  {c.isRecommended && (
+                    <Text color="claude" bold>
+                      {" ★ Claude's pick"}
+                    </Text>
+                  )}
                 </Button>
               </Box>
             )

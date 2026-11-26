@@ -162,7 +162,7 @@ describe('the For you section', () => {
     on('ui.toast', () => ({ value: undefined }))
 
     const ui = await $.ui.mount(PANE)
-    expect((await ui.find({ key: 'you-0-pick-0' }))?.text).toContain('Welcome back catch-up ★')
+    expect((await ui.find({ key: 'you-0-pick-0' }))?.text).toMatch(/Welcome back catch-up +★ Claude's pick/)
     expect((await ui.find({ key: 'you-0-pick-0' }))?.props.hotkey).toBe('a')
     expect((await ui.find({ key: 'you-0-pick-1' }))?.text).toContain('CI arrivals board')
     await ui.press({ key: 'you-0-pick-1' })
