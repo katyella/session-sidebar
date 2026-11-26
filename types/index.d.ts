@@ -71,6 +71,33 @@ export type ForYouChoice = {
   isRecommended: boolean
 }
 
+/** Another Claude session, on this machine or one of the person's others: its road and what it waits on them for. */
+export type OtherSession = {
+  id: string
+  /** The ssh target it was read over; '' on this machine. */
+  host: string
+  /** Its project folder as a name ("podcast-search"). */
+  project: string
+  /** Its transcript's last write, on this machine's clock; 0 when it has none. */
+  activeAt: number
+  /** Its road's title and steps: how many done of how many, and the one in progress or in trouble. */
+  title: string
+  done: number
+  total: number
+  current?: { state: 'now' | 'problem'; text: string }
+  /** Its open for-you items. */
+  items: ForYouItem[]
+}
+
+/** One machine of the person's other machines setting, as its last scan left it. */
+export type OtherHost = { target: string; isUp: boolean; error?: string; at: number }
+
+/** The other sessions, as the last scans left them. */
+export type Others = { sessions: OtherSession[]; hosts: OtherHost[]; at: number }
+
+/** What is opened in Other sessions: sessions by `<host>/<id>`, and the machines folded away, by target ('' this one). */
+export type OthersView = { open: string[]; folded: string[] }
+
 /** What the person should look at, decide or do now, from <session>/scratchpad/for-you.md. */
 export type ForYou = {
   items: ForYouItem[]
@@ -123,6 +150,9 @@ declare module 'claude-code' {
       selected: Shaped<string>
       tail: Shaped<Tail>
       filesNote: Shaped<FilesNote>
+      /** Other Claude sessions, here and on the person's other machines. */
+      others: Shaped<Others>
+      othersView: Shaped<OthersView>
     }
   }
 }

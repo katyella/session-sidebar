@@ -1,9 +1,10 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderSurface, ThemeKey } from 'claude-code'
+import type { EngineInterface, Register, RenderElement, RenderSurface, ThemeKey } from 'claude-code'
 
-import type { AgentMessage, BgAgent, BgTask, FilesNote, ForYou, ForYouItem, Road, RoadItem, Tail } from '../types'
-import { FOR_YOU_GUTTER, URL_SPLIT, forYouView, linkLabel, parseForYou, trimLink, withoutLinks } from './for-you'
+import type { AgentMessage, BgAgent, BgTask, FilesNote, ForYou, ForYouItem, OtherSession, Others, OthersView, Road, RoadItem, Tail } from '../types'
+import { FOR_YOU_GUTTER, URL_SPLIT, cutMiddle, forYouView, itemLinks, linkLabel, parseForYou, trimLink, withoutLinks } from './for-you'
 import type { ForYouView } from './for-you'
+import { LOCAL_SCAN, REMOTE_SCAN, WORKING_MS, othersShown, parseScan } from './others'
 
 // No gray (dimColor or 'inactive'): it is hard to read in this terminal theme.
 const PANE = 'session-sidebar'
@@ -15,6 +16,14 @@ const selected = atom({ plugin: 'session-sidebar', key: 'selected' } as const, '
 const road = atom({ plugin: 'session-sidebar', key: 'road' } as const, { title: '', items: [], mtimeMs: 0 }, { shape: 'road-1' })
 const forYou = atom({ plugin: 'session-sidebar', key: 'forYou' } as const, { items: [], mtimeMs: 0 } as ForYou, { shape: 'foryou-3' })
 const forYouOpen = atom({ plugin: 'session-sidebar', key: 'forYouOpen' } as const, '', { shape: 'foryouopen-1' })
+const others = atom({ plugin: 'session-sidebar', key: 'others' } as const, { sessions: [], hosts: [], at: 0 } as Others, { shape: 'others-1' })
+const othersView = atom({ plugin: 'session-sidebar', key: 'othersView' } as const, { open: [], folded: [] } as OthersView, { shape: 'othersview-1' })
+/** Lines Other sessions takes at most, headings of machines included. */
+const OTHERS_ROWS = 10
+/** This machine's sessions are read this often; another machine's every minute, or five after it failed. */
+const LOCAL_SCAN_MS = 10_000
+const REMOTE_SCAN_MS = 60_000
+const REMOTE_RETRY_MS = 5 * 60_000
 /** Kept in session state so a plugin reload after a /clear still knows the first session's scratchpad. */
 const sessions = atom({ plugin: 'session-sidebar', key: 'sessions' } as const, [] as string[], { shape: 'sessions-1' })
 /** Keys that press a choice's options, in order: letters the pane does not use (c clears, f follows). */
@@ -982,6 +991,71 @@ function age(t: BgTask, now: number): string {
   return `took ${clock(ended - t.startedAt)}, ${clock(now - ended)} ago`
 }
 
+// ---------- Other sessions ----------
+
+/** The other machines setting: ssh targets, each read as the person's own login there would. */
+let machines: string[] = []
+let isScanningLocal = false
+const remote = new Map<string, { isBusy: boolean; nextAt: number }>()
+
+/** This machine's other sessions: the scratchpads beside this session's, read-only. */
+async function scanLocal($: EngineInterface): Promise<void> {
+  if (isScanningLocal) return
+  isScanningLocal = true
+  try {
+    const scratch = (await $.session.info().catch(() => undefined))?.scratchpadDir?.replace(/\/+$/, '')
+    if (scratch === undefined || scratch === '') return
+    // This session, and the ids it had before a /clear, show in For you and Road already.
+    const skip = new Set([await $.session.id(), ...(await read($, sessions))])
+    const out = await $.process.run(['/bin/sh', '-c', LOCAL_SCAN, 'sh', scratch], { timeoutMs: 15_000 }).catch(() => undefined)
+    if (out === undefined) return
+    const now = await $.clock.now()
+    const local = parseScan(out.stdout, '', skip, now)
+    await update($, others, cur => {
+      const next = [...local, ...cur.sessions.filter(s => s.host !== '')]
+      return JSON.stringify(next) === JSON.stringify(cur.sessions) ? cur : { ...cur, sessions: next, at: now }
+    })
+  } finally {
+    isScanningLocal = false
+  }
+}
+
+/**
+ * One of the person's other machines, over ssh with the script on stdin: BatchMode, so a host that would ask
+ * for a password or an unknown host key fails rather than waits. A machine that fails is tried again in five
+ * minutes; its sessions leave the list meanwhile.
+ */
+async function scanRemote($: EngineInterface, target: string): Promise<void> {
+  const st = remote.get(target) ?? { isBusy: false, nextAt: 0 }
+  remote.set(target, st)
+  const now = await $.clock.now()
+  if (st.isBusy || now < st.nextAt) return
+  st.isBusy = true
+  try {
+    const out = await $.process
+      .run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', target, 'sh -s'], { stdin: REMOTE_SCAN, timeoutMs: 20_000 })
+      .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: error instanceof Error ? error.message : String(error) }))
+    const at = await $.clock.now()
+    const isUp = out.exitCode === 0 && /^NOW \d+/m.test(out.stdout)
+    st.nextAt = at + (isUp ? REMOTE_SCAN_MS : REMOTE_RETRY_MS)
+    const found = isUp ? parseScan(out.stdout, target, new Set(), at) : []
+    const why = isUp ? undefined : (out.stderr.trim().split('\n').pop() ?? `exit ${out.exitCode}`).slice(0, 120)
+    await update($, others, cur => ({
+      ...cur,
+      sessions: [...cur.sessions.filter(s => s.host !== target), ...found],
+      hosts: [...cur.hosts.filter(h => h.target !== target), { target, isUp, at, ...(why !== undefined ? { error: why } : {}) }],
+      at,
+    }))
+  } finally {
+    st.isBusy = false
+  }
+}
+
+async function scanOthers($: EngineInterface, tick: number): Promise<void> {
+  if (tick % Math.round(LOCAL_SCAN_MS / POLL_MS) === 0) await scanLocal($).catch(() => undefined)
+  for (const target of machines) void scanRemote($, target).catch(() => undefined)
+}
+
 const NOTIFICATION = /<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>(?:[\s\S]*?<summary>([^<]*)<\/summary>)?/g
 
 /** Prompts with no sidebar to fill, or whose writer is not the lead: no section. */
@@ -1050,7 +1124,11 @@ async function filesContext($: EngineInterface): Promise<string | undefined> {
   return filesSection(scratchpad)
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const listed = options['otherMachines']
+  machines = (Array.isArray(listed) ? listed : typeof listed === 'string' ? listed.split(',') : [])
+    .map(t => String(t).trim())
+    .filter(t => t !== '' && !/\s/.test(t))
   on('session.start', async ($, e, next) => {
     // A refused command must not stop the polling below.
     await $.command.register({ name: 'sidebar', description: 'Open the session sidebar: road, tasks, agents and messages' }).catch(() => undefined)
@@ -1058,6 +1136,11 @@ export const register: Register = on => {
       id => update($, sessions, ids => (ids.includes(id) ? ids : [...ids, id].slice(-8))),
       () => undefined,
     )
+    let tick = 0
+    $.clock.every(POLL_MS, () => {
+      tick += 1
+      void scanOthers($, tick).catch(() => undefined)
+    })
     $.clock.every(POLL_MS, async () => {
       const now = await $.clock.now()
       if (polling && now - pollingSince < POLL_STUCK_MS) return
@@ -1223,6 +1306,156 @@ export const register: Register = on => {
     const forYouShown = forYouNow.items.slice(0, FOR_YOU_ROWS).map(item => forYouView(item, width, opened))
     // Always shown: an empty list reads "nothing now" (one row).
     const forYouRows = Math.max(1, forYouShown.reduce((n, v) => n + v.rows, 0) + (forYouNow.items.length > FOR_YOU_ROWS ? 1 : 0))
+    // Other sessions: by machine when there are other machines, each session one line until opened.
+    const othersNow = await read($, others)
+    const othersOpened = await read($, othersView)
+    const groups = ['', ...machines].map(host => ({
+      host,
+      list: othersShown(othersNow.sessions.filter(s => s.host === host), now),
+      state: othersNow.hosts.find(h => h.target === host),
+    }))
+    const isGrouped = machines.length > 0
+    const sessionKey = (s: OtherSession) => `${s.host}/${s.id}`
+    const otherLines: RenderElement[] = []
+    let othersHidden = 0
+    const pushOther = (line: RenderElement) => {
+      if (otherLines.length < OTHERS_ROWS) otherLines.push(line)
+      else othersHidden += 1
+    }
+    for (const g of groups) {
+      const isFolded = othersOpened.folded.includes(g.host)
+      if (isGrouped) {
+        const waiting = g.list.filter(s => s.items.length > 0).length
+        const isDown = g.state !== undefined && !g.state.isUp
+        const said =
+          g.host === ''
+            ? ''
+            : g.state === undefined
+              ? 'checking…'
+              : g.state.isUp
+                ? `read ${clock(now - g.state.at)} ago`
+                : `unreachable: ${g.state.error ?? ''}`
+        pushOther(
+          <Button
+            key={`others-machine-${g.host === '' ? 'here' : g.host}`}
+            plain
+            onPress={() => update($, othersView, v => ({ ...v, folded: v.folded.includes(g.host) ? v.folded.filter(h => h !== g.host) : [...v.folded, g.host] }))}
+          >
+            <Text color={isDown ? 'error' : 'claude'} bold>
+              {isFolded ? '▸ ' : '▾ '}
+              {g.host === '' ? 'this machine' : g.host}
+            </Text>
+            <Text color="suggestion" wrap="truncate-end">
+              {' '}
+              {g.list.length} session{g.list.length === 1 ? '' : 's'}
+              {waiting > 0 ? ` · ${waiting} waiting on you` : ''}
+              {said !== '' ? ` · ${said}` : ''}
+            </Text>
+          </Button>,
+        )
+        if (isFolded) continue
+      }
+      const indent = isGrouped ? '  ' : ''
+      for (const s of g.list) {
+        const isOpen = othersOpened.open.includes(sessionKey(s))
+        const isWorking = now - s.activeAt < WORKING_MS
+        const tone: ThemeKey = s.items.length > 0 ? 'warning' : isWorking ? 'claude' : 'success'
+        const first = s.items[0]
+        const summary =
+          first !== undefined
+            ? `${withoutLinks(first.text) || first.text}${s.items.length > 1 ? ` +${s.items.length - 1}` : ''}`
+            : isWorking
+              ? `working${s.current !== undefined ? ` · ${s.current.text}` : ''}`
+              : s.title !== ''
+                ? `${s.title} · ${s.done}/${s.total}`
+                : s.activeAt > 0
+                  ? `idle · ${clock(now - s.activeAt)} ago`
+                  : 'idle'
+        const roomFor = Math.max(10, width - indent.length - s.project.length - 7)
+        pushOther(
+          <Button
+            key={`others-${s.host === '' ? 'here' : s.host}-${s.id}`}
+            plain
+            onPress={() => update($, othersView, v => ({ ...v, open: v.open.includes(sessionKey(s)) ? v.open.filter(k => k !== sessionKey(s)) : [...v.open, sessionKey(s)] }))}
+          >
+            <Text color={tone} bold>
+              {indent}
+              {isOpen ? '▾ ' : '▸ '}
+              {s.items.length > 0 ? '⚑ ' : isWorking ? '◆ ' : '● '}
+            </Text>
+            <Text bold>{s.project}</Text>
+            <Text> {cutMiddle(summary, roomFor)}</Text>
+          </Button>,
+        )
+        if (!isOpen) continue
+        const pad = `${indent}    `
+        const room = Math.max(10, width - pad.length - 4)
+        if (s.title !== '') {
+          const filled = s.total > 0 ? Math.round((s.done / s.total) * 6) : 0
+          pushOther(
+            <Text key={`others-${s.id}-road`} wrap="truncate-end">
+              {pad}
+              <Text color="success">{'▰'.repeat(filled) + '▱'.repeat(6 - filled)}</Text> {cutMiddle(s.title, room - 14)}{' '}
+              <Text color="suggestion">
+                {s.done}/{s.total}
+              </Text>
+            </Text>,
+          )
+        }
+        if (s.current !== undefined) {
+          pushOther(
+            <Text key={`others-${s.id}-now`} wrap="truncate-end">
+              {pad}
+              <Text color={s.current.state === 'problem' ? 'error' : 'claude'} bold>
+                {s.current.state === 'problem' ? '✗ ' : '▶ '}
+              </Text>
+              {cutMiddle(s.current.text, room)}
+            </Text>,
+          )
+        }
+        s.items.forEach((item, j) => {
+          const links = itemLinks(item).slice(0, 2)
+          pushOther(
+            <Box key={`others-${s.id}-item-${j}`} flexDirection="row">
+              <Text color="warning" bold>
+                {pad}
+                {'⚑ '}
+              </Text>
+              <Text bold wrap="truncate-end">
+                {cutMiddle(withoutLinks(item.text) || item.text, room - links.length * 14)}
+              </Text>
+              {links.map(url => (
+                <Text key={url}>
+                  {' '}
+                  <Link href={url} label={linkLabel(url)} />
+                </Text>
+              ))}
+            </Box>,
+          )
+          for (const c of item.choices ?? []) {
+            pushOther(
+              <Text key={`others-${s.id}-item-${j}-${c.label}`} wrap="truncate-end">
+                {pad}
+                {'    '}
+                {c.isRecommended ? '(*) ' : '( ) '}
+                {cutMiddle(c.label, room - 6)}
+              </Text>,
+            )
+          }
+        })
+        if (s.items.some(item => (item.choices?.length ?? 0) > 0)) {
+          pushOther(
+            <Text key={`others-${s.id}-there`} color="suggestion">
+              {pad}answer its choices in that session
+            </Text>,
+          )
+        }
+      }
+    }
+    if (othersHidden > 0) otherLines.push(<Text key="others-more" color="warning">{`+${othersHidden} more lines: fold a machine or a session`}</Text>)
+    const othersWaiting = othersNow.sessions.filter(s => s.items.length > 0 && groups.some(g => g.host === s.host)).length
+    const othersWorking = othersNow.sessions.filter(s => now - s.activeAt < WORKING_MS).length
+    const othersRows = otherLines.length > 0 ? otherLines.length + 2 : 0
     const agentList = await read($, agents)
     const agentsInOrder = orderedAgents(agentList)
     const shown = ordered(list, now).slice(0, agentsInOrder.length > 0 ? MAX_ROWS - 1 : MAX_ROWS)
@@ -1231,7 +1464,7 @@ export const register: Register = on => {
     const currentAgent = agentList.find(a => a.id === view.id && a.hidden !== true)
     const currentLabel = currentTask !== undefined ? label(currentTask) : currentAgent !== undefined ? `${agentLabel(currentAgent)} (${currentAgent.type})` : undefined
     // Rows left for output: the headings and spacer lines, both lists, the keys (three), the frame.
-    const room = Math.max(4, rows - shown.length - shownAgents.length - 13 - (shownAgents.length > 0 ? 2 : 0) - (roadRows > 0 ? roadRows + 2 : 0) - (forYouRows + 2))
+    const room = Math.max(4, rows - shown.length - shownAgents.length - 13 - (shownAgents.length > 0 ? 2 : 0) - (roadRows > 0 ? roadRows + 2 : 0) - (forYouRows + 2) - othersRows)
     const keys = shown.length + shownAgents.length
     const picks = keys > 1 ? `1–${keys}` : '1'
     const working = agentList.filter(a => a.hidden !== true && agentIsLive(a)).length
@@ -1372,6 +1605,14 @@ export const register: Register = on => {
         {forYouShown.map(forYouRow)}
         {forYouNow.items.length > FOR_YOU_ROWS && <Text color="warning">+{forYouNow.items.length - FOR_YOU_ROWS} more in for-you.md</Text>}
         <Text> </Text>
+        {otherLines.length > 0 &&
+          heading(
+            'OTHER SESSIONS',
+            [othersWaiting > 0 ? `${othersWaiting} waiting on you` : '', othersWorking > 0 ? `${othersWorking} working` : ''].filter(p => p !== '').join(' · '),
+            othersWaiting > 0 ? 'warning' : 'claude',
+          )}
+        {otherLines}
+        {otherLines.length > 0 && <Text> </Text>}
         {roadRows > 0 && heading('ROAD SO FAR', roadNow.title)}
         {roadView.folded > 0 && <Text color="success">✓ {roadView.folded} earlier steps done</Text>}
         {roadView.lines.map((item, i) => (
